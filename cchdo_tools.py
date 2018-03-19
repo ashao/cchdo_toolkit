@@ -186,6 +186,7 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
         expodata['sigma2'] = gsw.density.sigma2( expodata['abssal'],expodata['temperature'])
         expodata['rhoinsitu'] = gsw.density.rho( expodata['abssal'],expodata['temperature'],expodata['pressure'])
 
+    expodata['expocode'] = exponame
     return expodata
 
 def extract_all_expos( qc_flags = [2], fields_in = set(), fields_0_in = set(), datapath = datapath_glob, aux_fields = True ):
@@ -225,5 +226,19 @@ def extract_all_expos( qc_flags = [2], fields_in = set(), fields_0_in = set(), d
         expodata[exponame] = extract_expo_fields( exponame, qc_flags, fields_in, fields_0_in, datapath, aux_fields )
 
     return expodata
+
+def plot_expo_transect( expodata, proj, figsize = (12,6) ):
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize = figsize)
+    ax = plt.axes(projection=proj)
+    ax.plot(expodata['longitude'],expodata['latitude'], 'ko', transform=ccrs.PlateCarree())
+    ax.add_feature(cfeature.COASTLINE)
+    ax.add_feature(cfeature.LAND,facecolor='0.25')
+    plt.title(expodata['expocode'])
+    plt.show()
+
 
 
