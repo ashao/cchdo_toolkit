@@ -11,6 +11,8 @@ exponames_glob = []
 # This is WOCE date offset (as specified in the standard) in python's datetime type
 woce_ref_time = datetime(1980,1,1)
 
+import pandas
+
 def update_expo_list( datapath='', outfile = "" ):
     """
     Returns all unique expocodes and optionally write them to a file for later reference
@@ -88,7 +90,7 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
     """
     from os.path import join
     from glob import glob
-    from netCDF4 import Dataset
+    from netCDF4 import Dataset, chartostring
     import numpy as np
     import gsw
 
@@ -135,7 +137,11 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
         if really_verbose:
             print("File %s has %d measurements" % (file, nk))
         for field in fields_0:
-            expodata[field] = np.append(expodata[field],expo_ncvars[field][:]*np.ones(nk))
+            if field == 'station':
+                stid = int(np.asscalar(chartostring(expo_ncvars[field][:])))
+                expodata[field] = np.append(expodata[field],stid*np.ones(nk))
+            else:
+                expodata[field] = np.append(expodata[field],expo_ncvars[field][:]*np.ones(nk))
         # Read in the bottle fields and also the QC field if it exists
         for field in fields:
             # Try to read the field in the open netCDF
@@ -187,6 +193,12 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
         expodata['rhoinsitu'] = gsw.density.rho( expodata['abssal'],expodata['temperature'],expodata['pressure'])
 
     expodata['expocode'] = exponame
+
+    expodata = pandas.DataFrame.from_dict(expodata)
+    # Calculate distance along transect
+    expodata.sort_values('time',inplace=True)
+    expodata['distance'] = np.append(0,gsw.distance(np.array(expodata.longitude), np.array(expodata.latitude),p=np.zeros(expodata.latitude.shape)).cumsum())
+
     return expodata
 
 def extract_all_expos( qc_flags = [2], fields_in = set(), fields_0_in = set(), datapath = datapath_glob, aux_fields = True ):
@@ -227,18 +239,41 @@ def extract_all_expos( qc_flags = [2], fields_in = set(), fields_0_in = set(), d
 
     return expodata
 
-def plot_expo_transect( expodata, proj, figsize = (12,6) ):
+def plot_expo_transect( expodata, proj=None, figsize = (12,6) ):
+    """
+    Plot the transect of a given expedition
+    Inputs:
+        expodata: Dictionary containing the latitude and longitude fields
+        proj:     Specify a particular map projection to use
+        figuse:   Specify the size of a figure
+    """
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
 
+    if proj is None:
+        proj = ccrs.PlateCarree(central_longitude=0.5*(20+380))
     fig = plt.figure(figsize = figsize)
     ax = plt.axes(projection=proj)
-    ax.plot(expodata['longitude'],expodata['latitude'], 'ko', transform=ccrs.PlateCarree())
+    ax.plot(expodata['longitude'],expodata['latitude'], 'bo', transform=ccrs.PlateCarree())
     ax.add_feature(cfeature.COASTLINE)
     ax.add_feature(cfeature.LAND,facecolor='0.25')
-    plt.title(expodata['expocode'])
+    ax.set_global()
+    plt.title(expodata['expocode'].upper())
     plt.show()
+
+def grid_expo_variables( expodata, xgrid, ygrid, xvar = 'longitude', yvar = 'pressure' ):
+    """
+    Grid the scattered bottle data to the requested points using a 'universal kriging' approach
+    Inputs:
+        expodata: Dictionary containing the data from the cruise
+        xgrid:    The x-value of points of the output grid
+        ygrid:    The y-value of points of the output grid
+    Optional inputs:
+        xvar:     The name of the x variable (default: longitude)
+        yvar:     The name of the y variable (default: pressure)
+    """
+    return
 
 
 
