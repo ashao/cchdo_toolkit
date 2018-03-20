@@ -94,7 +94,6 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
     import numpy as np
     import gsw
 
-
     global datapath_glob
     global exponames_glob
 
@@ -262,18 +261,40 @@ def plot_expo_transect( expodata, proj=None, figsize = (12,6) ):
     plt.title(expodata['expocode'].upper())
     plt.show()
 
-def grid_expo_variables( expodata, xgrid, ygrid, xvar = 'longitude', yvar = 'pressure' ):
+def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'longitude', yvar = 'pressure', nx = None, ny = None, **krigargs  ):
     """
     Grid the scattered bottle data to the requested points using a 'universal kriging' approach
     Inputs:
         expodata: Dictionary containing the data from the cruise
+        zvar:     The name of the variable to be gridded
+    Optional inputs:
         xgrid:    The x-value of points of the output grid
         ygrid:    The y-value of points of the output grid
-    Optional inputs:
         xvar:     The name of the x variable (default: longitude)
         yvar:     The name of the y variable (default: pressure)
+        nx:       Number of points to grid along the x-axis (overrides xgrid)
+        ny:       Number of points to grid along the y-axis (overrides ygrid)
     """
-    return
 
+    if not (nx is None) and (ny is None):
+        print("nx and ny must either both be none or valid integers")
 
+    import pykrige
+    import numpy as np
+    x = np.array(expodata[xvar]);
+    y = np.array(expodata[yvar]);
+    z = np.array(expodata[zvar]);
+    notnan = np.logical_not(np.logical_and( np.isnan(x), np.logical_and(np.isnan(y), np.isnan(z) )))
+    x = x[notnan]
+    y = y[notnan]
+    z = z[notnan]
 
+    krige = pykrige.UniversalKriging( x, y, z, **krigargs )
+    if (nx is not None) and (ny is not None):
+        xgrid, ygrid = np.meshgrid( np.linspace(x.min(),x.max(),nx), np.linspace(y.min(),y.max(),ny) )
+    if x.ndim > 1 and y.ndim > 1:
+        zgrid = krige.execute( 'grid', xgrid, ygrid )
+    else:
+        zgrid = krige.execute( 'points', xgrid, ygrid )
+
+    return zgrid, krige
