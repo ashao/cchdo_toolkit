@@ -261,9 +261,60 @@ def plot_expo_transect( expodata, proj=None, figsize = (12,6) ):
     plt.title(expodata['expocode'].upper())
     plt.show()
 
-def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'longitude', yvar = 'pressure', nx = None, ny = None, **krigargs  ):
+def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
     """
-    Grid the scattered bottle data to the requested points using a 'universal kriging' approach
+    Maps scattered data onto the specified grid using a Barnes style interpolation
+    """
+    import numpy as np
+    def calc_weights(xp, yp, x, y):
+      import itertools
+      dx = np.array([ x1 - x2 for (x1,x2) in itertools.product( xp, x ) ])
+      dy = np.array([ y1 - y2 for (y1,y2) in itertools.product( yp, y ) ])
+      dx2 = dx*dx
+      dy2 = dy*dy
+      xcorr2 = xcorr*xcorr
+      ycorr2 = ycorr*ycorr
+      w = np.exp((-dx2/xcorr2) - (dy2/ycorr2))
+      w = w.reshape( (xp.size,-1) )
+      # If a point is far far outside the correlation scale, set the weights to nan
+      wtnorm = w.sum(axis=-1)
+      wtnorm = np.ma.masked_where(wtnorm == 0., wtnorm)
+      w = w/wtnorm[:,np.newaxis]
+      return w
+
+    x = np.array(x)
+    y = np.array(y)
+    z = np.array(z)
+
+    xp = np.array(xi).reshape(-1)
+    yp = np.array(yi).reshape(-1)
+
+    # Weight matrix from output points to input points
+    wp = calc_weights(xp,yp,x,y)
+
+    # Weight matrix from input points to input poitns
+    w = calc_weights(x,y,x,y)
+
+    zpp = zp = np.sum(wp*z,axis=-1)
+    zpb = np.zeros(z.shape)
+
+    for iter in range(2,npass+1):
+      if np.mod(iter,2)==0:
+        zpa = zpb + np.sum((z-zpb)*w, axis=-1)
+        zp  = zp  + np.sum((z-zpa)*wp,axis=-1)
+        zpn = zp
+
+      else:
+        zpb = zpa + np.sum((z-zpa)*w, axis=-1)
+        zp  = zp  + np.sum((z-zpb)*wp,axis=-1)
+        zpp = zp
+      print('RMS adjustment after pass %d: %f' % (iter, np.std(zpn-zpp)))
+
+    return zp.reshape(xi.shape), w, wp
+
+def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=110e6, ycorr = 50, npass = 2 ):
+    """
+    Grid the scattered bottle data to the requested points using a Barnes objective mapping
     Inputs:
         expodata: Dictionary containing the data from the cruise
         zvar:     The name of the variable to be gridded
@@ -274,27 +325,30 @@ def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'lo
         yvar:     The name of the y variable (default: pressure)
         nx:       Number of points to grid along the x-axis (overrides xgrid)
         ny:       Number of points to grid along the y-axis (overrides ygrid)
-    """
+        xcorr:    Correlation scale in units of x-variable along x
+        ycorr:    Correlation scale in units of y-variable along y
+        npass:    Number of passes to use in the objective mapping
 
+    """
+    import numpy as np
     if not (nx is None) and (ny is None):
         print("nx and ny must either both be none or valid integers")
 
-    import pykrige
     import numpy as np
-    x = np.array(expodata[xvar]);
-    y = np.array(expodata[yvar]);
-    z = np.array(expodata[zvar]);
-    notnan = np.logical_not(np.logical_and( np.isnan(x), np.logical_and(np.isnan(y), np.isnan(z) )))
+    x = expodata[xvar].as_matrix();
+    y = expodata[yvar].as_matrix();
+    z = expodata[zvar].as_matrix();
+    notnan = np.logical_not(np.logical_or( np.isnan(x), np.logical_or(np.isnan(y), np.isnan(z) )))
     x = x[notnan]
     y = y[notnan]
     z = z[notnan]
 
-    krige = pykrige.UniversalKriging( x, y, z, **krigargs )
+    # Make the grid if only a number of points is specified
     if (nx is not None) and (ny is not None):
-        xgrid, ygrid = np.meshgrid( np.linspace(x.min(),x.max(),nx), np.linspace(y.min(),y.max(),ny) )
-    if x.ndim > 1 and y.ndim > 1:
-        zgrid = krige.execute( 'grid', xgrid, ygrid )
-    else:
-        zgrid = krige.execute( 'points', xgrid, ygrid )
+        xgrid = np.linspace(x.min(), x.max(), nx)
+        ygrid = np.linspace(y.min(), y.max(), ny)
+        xgrid, ygrid = np.meshgrid(xgrid,ygrid)
+    # Interpolate using a Barnes objective mapping
+    zz, _, _ = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass)
 
-    return zgrid, krige
+    return zz, xgrid, ygrid, x, y, z
