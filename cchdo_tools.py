@@ -116,17 +116,19 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
         print("Expocode %s has %d files" % (exponame, len(filelist) ) )
 
     # Initialize the dictionary used to store the extracted fields
-    expodata = {}
+    botdata = {}
+    stadata = {}
     numskip = {}
     for field in fields:
-        expodata[field] = np.array([])
+        botdata[field] = np.array([])
         numskip[field] = 0
     for field in fields_0:
-        expodata[field] = np.array([])
+        botdata[field] = np.array([])
+        stadata[field] = np.array([])
 
     if len(filelist) == 0:
         print("WARNING: No input files associated with %s" % exponame)
-        return expodata
+        return botdata
 
     for file in filelist:
         # Read in the scalar fields and replicate it so that every bottle measurement
@@ -136,11 +138,8 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
         if really_verbose:
             print("File %s has %d measurements" % (file, nk))
         for field in fields_0:
-            if field == 'station':
-                stid = int(np.asscalar(chartostring(expo_ncvars[field][:])))
-                expodata[field] = np.append(expodata[field],stid*np.ones(nk))
-            else:
-                expodata[field] = np.append(expodata[field],expo_ncvars[field][:]*np.ones(nk))
+            stadata[field] = np.append(stadata[field],expo_ncvars[field][:])
+            botdata[field] = np.append(botdata[field],expo_ncvars[field][:]*np.ones(nk))
         # Read in the bottle fields and also the QC field if it exists
         for field in fields:
             # Try to read the field in the open netCDF
@@ -166,38 +165,49 @@ def extract_expo_fields( exponame, qc_flags = [2], fields_in = set(), fields_0_i
                 except:
                     if really_verbose and (field != 'temperature' and field != 'pressure'):
                         print("QC for field %s does not exist" % field)
-                expodata[field] = np.append(expodata[field],tempvar)
+                botdata[field] = np.append(botdata[field],tempvar)
             # If the variable can't be found in the field, append NaNs to main consistency in array shapes
             # Record that the a variable was skipped
             except:
                 numskip[field] += 1
-                expodata[field] = np.append(expodata[field],np.zeros(nk)*np.nan)
+                botdata[field] = np.append(botdata[field],np.zeros(nk)*np.nan)
                 if verbose:
                     print("Could not find %s in file %s" % (field,file) )
         # Closeout the file
         Dataset(join(datapath,file)).close()
 
     # Use the reference time to convert to python datetime format
-    expodata['time'] = [ woce_ref_time + timedelta(minutes=time) for time in expodata['time'] ]
+    botdata['time'] = [ woce_ref_time + timedelta(minutes=time) for time in botdata['time'] ]
+    stadata['time'] = [ woce_ref_time + timedelta(minutes=time) for time in stadata['time'] ]
+    # Convert longitudes to 0 to 360
+    botdata['longitude'] = np.mod(botdata['longitude'],360)
+    stadata['longitude'] = np.mod(stadata['longitude'],360)
+
     # Print out how many files did not have the requested field in them
     if verbose:
         [print("Field %s could not be found in %d files" % (field, numskip[field])) for field in fields if numskip[field]>0 ]
 
     if aux_fields:
-        expodata['abssal'] = gsw.conversions.SA_from_SP( expodata['bottle_salinity'], expodata['pressure'], expodata['longitude'], expodata['latitude'])
-        expodata['ctemp' ] = gsw.conversions.CT_from_t(  expodata['abssal'],expodata['temperature'],expodata['pressure'])
-        expodata['ptemp0'] = gsw.conversions.pt0_from_t( expodata['abssal'],expodata['temperature'],expodata['pressure'])
-        expodata['sigma0'] = gsw.density.sigma0( expodata['abssal'],expodata['temperature'])
-        expodata['sigma2'] = gsw.density.sigma2( expodata['abssal'],expodata['temperature'])
-        expodata['rhoinsitu'] = gsw.density.rho( expodata['abssal'],expodata['temperature'],expodata['pressure'])
+        botdata['abssal'] = gsw.conversions.SA_from_SP( botdata['bottle_salinity'], botdata['pressure'], botdata['longitude'], botdata['latitude'])
+        botdata['ctemp' ] = gsw.conversions.CT_from_t(  botdata['abssal'],botdata['temperature'],botdata['pressure'])
+        botdata['ptemp0'] = gsw.conversions.pt0_from_t( botdata['abssal'],botdata['temperature'],botdata['pressure'])
+        botdata['sigma0'] = gsw.density.sigma0( botdata['abssal'],botdata['temperature'])
+        botdata['sigma2'] = gsw.density.sigma2( botdata['abssal'],botdata['temperature'])
+        botdata['rhoinsitu'] = gsw.density.rho( botdata['abssal'],botdata['temperature'],botdata['pressure'])
 
-    expodata['expocode'] = exponame
 
-    expodata = pandas.DataFrame.from_dict(expodata)
+    botdata = pandas.DataFrame.from_dict(botdata)
+    stadata = pandas.DataFrame.from_dict(stadata)
     # Calculate distance along transect
-    expodata.sort_values('time',inplace=True)
-    expodata['distance'] = np.append(0,gsw.distance(np.array(expodata.longitude), np.array(expodata.latitude),p=np.zeros(expodata.latitude.shape)).cumsum())
+    botdata.sort_values('time',inplace=True)
+    stadata.sort_values('time',inplace=True)
+    botdata['distance'] = np.append(0,gsw.distance(np.array(botdata.longitude), np.array(botdata.latitude),p=np.zeros(botdata.latitude.shape)).cumsum())
+    stadata['distance'] = np.append(0,gsw.distance(np.array(stadata.longitude), np.array(stadata.latitude),p=np.zeros(stadata.latitude.shape)).cumsum())
 
+    expodata = {}
+    expodata['station'] = stadata
+    expodata['bottle'] =  botdata
+    expodata['expocode'] = exponame
     return expodata
 
 def extract_all_expos( qc_flags = [2], fields_in = set(), fields_0_in = set(), datapath = datapath_glob, aux_fields = True ):
@@ -254,7 +264,7 @@ def plot_expo_transect( expodata, proj=None, figsize = (12,6) ):
         proj = ccrs.PlateCarree(central_longitude=0.5*(20+380))
     fig = plt.figure(figsize = figsize)
     ax = plt.axes(projection=proj)
-    ax.plot(expodata['longitude'],expodata['latitude'], 'bo', transform=ccrs.PlateCarree())
+    ax.plot(expodata[station]['longitude'],expodata[station]['latitude'], 'bo', transform=ccrs.PlateCarree())
     ax.add_feature(cfeature.COASTLINE)
     ax.add_feature(cfeature.LAND,facecolor='0.25')
     ax.set_global()
@@ -323,11 +333,11 @@ def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
 
     return zp.reshape(xi.shape), w, wp
 
-def grid_expo_variables( expodata, fields,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=110e6, ycorr = 50, npass = 2 ):
+def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=None, ycorr = 50, npass = 2 ):
     """
     Grid the scattered bottle data to the requested points using a Barnes objective mapping
     Inputs:
-        expodata: Dictionary containing the data from the cruise
+        botdata: Dictionary containing the data from the cruise
         fields:   A list of fields to be gridded
     Optional inputs:
         xgrid:    The x-value of points of the output grid
@@ -346,8 +356,13 @@ def grid_expo_variables( expodata, fields,  xgrid = None, ygrid = None, xvar = '
     if not (nx is None) and (ny is None):
         print("nx and ny must either both be none or valid integers")
 
-    x = np.ma.masked_invalid(expodata[xvar].as_matrix())
-    y = np.ma.masked_invalid(expodata[yvar].as_matrix())
+    x = np.ma.masked_invalid(botdata[xvar].as_matrix())
+    y = np.ma.masked_invalid(botdata[yvar].as_matrix())
+
+    if xcorr is None:
+        xcorr = np.mean( np.diff(np.unique(x) ))*2
+    if ycorr is None:
+        ycorr = np.mean( np.diff(np.unique(y) ))*2
 
     # Initialize an empty dictionary containing all the remapped fields
     remap = {}
@@ -358,13 +373,79 @@ def grid_expo_variables( expodata, fields,  xgrid = None, ygrid = None, xvar = '
     xgrid, ygrid = np.meshgrid(xgrid,ygrid)
     remap[xvar] = xgrid
     remap[yvar] = ygrid
+    remap['xcorr'] = xcorr
+    remap['ycorr'] = ycorr
 
     # Need to calculate w and wp for the first field of interpolation
+    if verbose:
+        print("Begin objective mapping with %d passes, %f x length scale, %f y length scale" % (npass, xcorr, ycorr) )
     w = None ; wp = None
     for zvar in fields:
-        z = np.ma.masked_invalid(expodata[zvar].as_matrix())
+        z = np.ma.masked_invalid(botdata[zvar].as_matrix())
         if verbose:
             print("Number of measurements for %s: %d" % (zvar,z.size))
         remap[zvar], w, wp = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
 
     return remap
+
+def map_gridded_fields_to_expo(stadata, griddeddata, gridfields, tidx = None, grid_xvar = 'nav_lon', grid_yvar = 'nav_lat', grid_zvar = 'deptht'):
+    """
+    Interpolate gridded data to the transect latitude and longitude. Data is first interpolated horizontally and then interpolated vertically
+    Inputs:
+        stadata:        dictionary or pandas dataframe containing station information
+        griddeddata:    dictionary describing gridded data
+        gridfields:     name of the fields in the gridded data to be mapped onto the transect
+    Inputs: (optional)
+        tidx:           use a specific time index or (default) average over the time axis
+        grid_xvar:      name of the x (longitude) variable in the griddeddata
+        grid_yvar:      name of the y (latitude) variable in the griddeddata
+        grid_zvar:      name of the z (depth) variable in the griddeddata
+    """
+
+    from scipy.interpolate import griddata
+    import numpy as np
+
+    # How much of the model data to include outside of the transect (in degrees lat/lon)
+    lonwindow = 5
+    latwindow = 5
+    # Make some shorthand variables
+    gridx = np.mod(griddeddata[grid_xvar],360)
+    gridy = griddeddata[grid_yvar]
+    gridz = griddeddata[grid_zvar]
+
+    # Mask the data in space to make the gridding faster
+    mask = np.ones(gridx.shape, dtype = bool)
+    mask = np.logical_and( mask, gridx > (stadata['longitude'].min() - lonwindow) )
+    mask = np.logical_and( mask, gridx < (stadata['longitude'].max() + lonwindow) )
+    mask = np.logical_and( mask, gridy > (stadata['latitude'].min() - latwindow) )
+    mask = np.logical_and( mask, gridy < (stadata['latitude'].max() + latwindow) )
+
+    # Initialize storage arrays
+    nk = gridz.size
+    nsta = len(stadata.index)
+    remapped = {}
+    remapped['latitude']  = np.zeros((nk,nsta))
+    remapped['longitude'] = np.zeros((nk,nsta))
+    remapped['distance']  = np.zeros((nk,nsta))
+    remapped['pressure']  = np.zeros((nk,nsta))
+
+    for field in gridfields:
+        # Use either a single timestep if tidx is provided, otherwise assume that we want to average over the time dimension
+        if tidx is None:
+            data = griddeddata[field][:,:,:,:].mean(axis = 0)
+        else:
+            data = griddeddata[field][tidx,:,:,:]
+        remapped[field] = np.zeros((nk,nsta))
+        if verbose:
+            print("Gridding %s with shape" % field, data.shape)
+        for k in range(0,nk):
+            subdata = data[k,:,:]
+            remapped[field][k,:] = griddata((gridx[mask],gridy[mask]),subdata[mask],(stadata['longitude'],stadata['latitude']))
+            remapped['latitude'][k,:] = stadata['latitude']
+            remapped['longitude'][k,:] = stadata['longitude']
+            remapped['distance'][k,:] = stadata['distance']
+            remapped['pressure'][k,:] = gridz[k]
+
+    return remapped
+
+
