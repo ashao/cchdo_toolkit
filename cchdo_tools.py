@@ -266,6 +266,8 @@ def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
     Maps scattered data onto the specified grid using a Barnes style interpolation
     """
     import numpy as np
+    from multiprocessing import Pool
+
     def calc_weights(xp, yp, x, y):
       import itertools
       dx = np.array([ x1 - x2 for (x1,x2) in itertools.product( xp, x ) ])
@@ -277,27 +279,35 @@ def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
       w = np.exp((-dx2/xcorr2) - (dy2/ycorr2))
       w = w.reshape( (xp.size,-1) )
       # If a point is far far outside the correlation scale, set the weights to nan
-      wtnorm = w.sum(axis=-1)
+      wtnorm = np.nansum(w,axis=-1)
       wtnorm = np.ma.masked_where(wtnorm == 0., wtnorm)
       w = w/wtnorm[:,np.newaxis]
-      return w
+
+      return np.ma.masked_invalid(w)
 
     x = np.array(x)
     y = np.array(y)
-    z = np.array(z)
+    z = np.ma.masked_invalid(z)
 
     xp = np.array(xi).reshape(-1)
     yp = np.array(yi).reshape(-1)
 
     # Weight matrix from output points to input points
-    wp = calc_weights(xp,yp,x,y)
+    if wp is None:
+        wp = calc_weights(xp,yp,x,y)
+    if verbose:
+        print("Size of weight matrix, output to input: %d %d" % wp.shape)
 
     # Weight matrix from input points to input poitns
-    w = calc_weights(x,y,x,y)
+    if w is None:
+        w = calc_weights(x,y,x,y)
+    if verbose:
+        print("Size of weight matrix, input to input: %d %d" % w.shape)
 
     zpp = zp = np.sum(wp*z,axis=-1)
     zpb = np.zeros(z.shape)
-
+    if verbose:
+        print("Standard deviation of initial guess: %f" % np.std(zp))
     for iter in range(2,npass+1):
       if np.mod(iter,2)==0:
         zpa = zpb + np.sum((z-zpb)*w, axis=-1)
@@ -308,16 +318,17 @@ def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
         zpb = zpa + np.sum((z-zpa)*w, axis=-1)
         zp  = zp  + np.sum((z-zpb)*wp,axis=-1)
         zpp = zp
-      print('RMS adjustment after pass %d: %f' % (iter, np.std(zpn-zpp)))
+      if verbose:
+          print('RMS adjustment after pass %d: %f' % (iter, np.std(zpn-zpp)))
 
     return zp.reshape(xi.shape), w, wp
 
-def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=110e6, ycorr = 50, npass = 2 ):
+def grid_expo_variables( expodata, fields,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=110e6, ycorr = 50, npass = 2 ):
     """
     Grid the scattered bottle data to the requested points using a Barnes objective mapping
     Inputs:
         expodata: Dictionary containing the data from the cruise
-        zvar:     The name of the variable to be gridded
+        fields:   A list of fields to be gridded
     Optional inputs:
         xgrid:    The x-value of points of the output grid
         ygrid:    The y-value of points of the output grid
@@ -331,24 +342,29 @@ def grid_expo_variables( expodata, zvar,  xgrid = None, ygrid = None, xvar = 'di
 
     """
     import numpy as np
+    from pandas import DataFrame
     if not (nx is None) and (ny is None):
         print("nx and ny must either both be none or valid integers")
 
-    import numpy as np
-    x = expodata[xvar].as_matrix();
-    y = expodata[yvar].as_matrix();
-    z = expodata[zvar].as_matrix();
-    notnan = np.logical_not(np.logical_or( np.isnan(x), np.logical_or(np.isnan(y), np.isnan(z) )))
-    x = x[notnan]
-    y = y[notnan]
-    z = z[notnan]
+    x = np.ma.masked_invalid(expodata[xvar].as_matrix())
+    y = np.ma.masked_invalid(expodata[yvar].as_matrix())
 
+    # Initialize an empty dictionary containing all the remapped fields
+    remap = {}
     # Make the grid if only a number of points is specified
     if (nx is not None) and (ny is not None):
         xgrid = np.linspace(x.min(), x.max(), nx)
         ygrid = np.linspace(y.min(), y.max(), ny)
-        xgrid, ygrid = np.meshgrid(xgrid,ygrid)
-    # Interpolate using a Barnes objective mapping
-    zz, _, _ = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass)
+    xgrid, ygrid = np.meshgrid(xgrid,ygrid)
+    remap[xvar] = xgrid
+    remap[yvar] = ygrid
 
-    return zz, xgrid, ygrid, x, y, z
+    # Need to calculate w and wp for the first field of interpolation
+    w = None ; wp = None
+    for zvar in fields:
+        z = np.ma.masked_invalid(expodata[zvar].as_matrix())
+        if verbose:
+            print("Number of measurements for %s: %d" % (zvar,z.size))
+        remap[zvar], w, wp = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
+
+    return remap
