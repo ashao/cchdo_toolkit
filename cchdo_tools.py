@@ -4,7 +4,7 @@ Routines to extract requested parameters in CCHDO's netcdf bottle parameters
 
 # Set some module level variables that can either be manually set or will be set during other routines
 from datetime import datetime, timedelta
-verbose = True
+verbose = False
 really_verbose = False
 datapath_glob = ''
 exponames_glob = []
@@ -12,6 +12,23 @@ exponames_glob = []
 woce_ref_time = datetime(1980,1,1)
 
 import pandas
+
+def set_exponames( exponames ):
+    global exponames_glob
+    exponames_glob = exponames
+
+def set_verbosity( verbosity = 0 ):
+    global verbose
+    global really_verbose
+    if verbosity == 0:
+        verbose = False
+        really_verbose = False
+    elif verbosity == 1:
+        verbose = True
+        really_verbose = False
+    elif verbosity >  1:
+        verbose = True
+        really_verbose = True
 
 def update_expo_list( datapath='', outfile = "" ):
     """
@@ -390,6 +407,7 @@ def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar 
     import itertools
     from pandas import DataFrame
     from matplotlib.path import Path
+    from scipy.interpolate import griddata
     if not (nx is None) and (ny is None):
         print("nx and ny must either both be none or valid integers")
 
@@ -459,10 +477,15 @@ def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar 
     w  = np.ma.MaskedArray(w )
 
     for zvar in fields:
+
         z = botdata[zvar][notnan]
         if verbose:
             print("Number of measurements for %s: %d" % (zvar,z.size))
-        zopt = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
+        if zvar == 'pressure':
+            # Pressure is treated as a special case because it should be relatively accurate and smooth already
+            zopt = griddata((x,y),z,(xp,yp),rescale = True).flatten()
+        else:
+            zopt = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
         # Initially say that the grid is all masked
         remap[zvar] = np.ma.masked_invalid(np.zeros(xgrid.shape)*np.nan)
         # Unmask the points in the valid dataset
@@ -471,6 +494,70 @@ def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar 
         remap[zvar][inpoints_grid] = zopt
 
     return remap
+
+def remap_fields( remap, fields, xvar, yvar1, yvar2, ny = None, ynew = None ):
+    """
+    Remap fields within the remap dictionary or pandas dataframe from one coordinate to another. For example, regridding from density to pressure
+    space.
+    Input:
+        remap:  Dictionary or dataframe from containing relevant data
+        fields: Which fields to remap
+        xvar:   Name of the x-coordinate to use
+        yvar1:  The name of the original coordinate (e.g. sigma2)
+        yvar2:  The name of the y-coordinate (e.g. pressure'), note that yvar2 must have also been mapped previously
+        ny:     If this is specified, will attempt to regrid onto a linearly spaced grid between min/max of yvar2
+        ynew:   The new grid discretized along yvar2 (probably the right way to use this routine)
+    """
+    import numpy as np
+    from scipy.interpolate import griddata
+    from matplotlib.path import Path
+
+
+    if ynew is None and ny is None:
+        print("ynew or ny must be specified")
+        return None
+
+    if ynew is None:
+        ynew = np.linspace(remap[yvar2].min(), remap[yvar2].max(), ny)
+
+    xin = remap[xvar].flatten()
+    yin = remap[yvar2].flatten()
+
+    xnew = np.unique(xin)
+    xint, yint = np.meshgrid(xnew,ynew)
+
+    # Setup the output dictionary
+    regrid = {}
+    regrid[xvar] = xint
+    regrid[yvar2] = yint
+
+    # Make a polygon defining the input extent of the data, note that we're assuming a regular grid
+    # First traverse along the x-direction finding the smallest valid value
+    nx, ny = remap[yvar2].shape
+    bound_poly = []
+    for i in range(0,nx):
+        bound_poly.append( (remap[xvar][i,0], remap[yvar2][i,:].min() ) )
+    # Do the same, but in reverse to get the largest valid value
+    for i in reversed(range(0,nx)):
+        bound_poly.append( (remap[xvar][i,0], remap[yvar2][i,:].max() ) )
+    # Make an array with the points
+    regrid['bound_poly'] = Path(bound_poly,closed=True)
+
+    # Make mask based on the valid input points
+    points = np.vstack( (xint.flatten(),yint.flatten() ) ).T
+    inpoints = regrid['bound_poly'].contains_points(points)
+    inpoints = inpoints.reshape(xint.shape)
+
+    for field in fields:
+        zin = remap[field].flatten()
+        notnan = np.logical_not( np.logical_or( np.logical_or( np.isnan(xin), np.isnan(yin) ), np.isnan(zin) ) )
+        # Do that actual regridding
+        zout = griddata( (xin[notnan], yin[notnan]), zin[notnan], (xint.flatten(), yint.flatten()), rescale = True)
+        zout = zout.reshape( xint.shape )
+        # Now store the results of the regridding and mask appropraitely
+        regrid[field] = np.ma.masked_where( inpoints, zout )
+
+    return regrid
 
 def map_gridded_fields_to_expo(stadata, griddeddata, gridfields, tidx = None, grid_xvar = 'nav_lon', grid_yvar = 'nav_lat', grid_zvar = 'deptht'):
     """
@@ -490,8 +577,8 @@ def map_gridded_fields_to_expo(stadata, griddeddata, gridfields, tidx = None, gr
     import numpy as np
 
     # How much of the model data to include outside of the transect (in degrees lat/lon)
-    lonwindow = 5
-    latwindow = 5
+    lonwindow = 2
+    latwindow = 2
     # Make some shorthand variables
     gridx = np.mod(griddeddata[grid_xvar],360)
     gridy = griddeddata[grid_yvar]
