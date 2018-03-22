@@ -271,48 +271,83 @@ def plot_expo_transect( expodata, proj=None, figsize = (12,6) ):
     plt.title(expodata['expocode'].upper())
     plt.show()
 
-def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
+def calc_weights(xp, yp, x, y, xcorr, ycorr):
+    """
+    Calculate the weights for the Barnes objective mapping. Essentially a gaussian dropoff as a function of distance
+    Note that this returns the unnormalized weights under the assumption that some points may not be valid for
+    different fields
+    Inputs:
+        xp: one set of x-coordinates
+        yp: one set of y-coordinates
+        x : the other set of x-coordinates
+        y:  the other set of y-coordinates
+        xcorr: x correlation length scale in units of the x coordinates
+        ycorr: y correlation length scale in units of the x coordinates
+    """
+    import itertools
+    import numpy as np
+
+    # If the correlation length scale(s) are provided, we can save some computational cost by scaling immediately
+    inv_corr = 1./xcorr
+    xp = xp * inv_corr
+    x  = x  * inv_corr
+    inv_corr = 1./ycorr
+    yp = yp * inv_corr
+    y  = y  * inv_corr
+
+    # First calculate the x-component of the weights
+    dp = np.fromiter([ x1 - x2 for (x1,x2) in itertools.product( xp, x ) ], np.float )
+    dp = dp*dp
+    w = -dp
+    # Calculate the y component of the weights
+    dp = np.array([ y1 - y2 for (y1,y2) in itertools.product( yp, y ) ])
+    dp = dp*dp
+    if xcorr is None:
+        inv_corr = 1./(4*np.mean(dp)) # Note the factor of four is because dp has already been squared (2*dp)**2
+        w = w - (dp*inv_corr)
+    else:
+        w = w - dp
+    w = np.exp(w)
+    return w.reshape(xp.size,-1)
+
+def barnes(x, y, z, xi, yi, xcorr, ycorr, npass = 2, w = None, wp = None):
     """
     Maps scattered data onto the specified grid using a Barnes style interpolation
     """
     import numpy as np
     from multiprocessing import Pool
 
-    def calc_weights(xp, yp, x, y):
-      import itertools
-      dx = np.array([ x1 - x2 for (x1,x2) in itertools.product( xp, x ) ])
-      dy = np.array([ y1 - y2 for (y1,y2) in itertools.product( yp, y ) ])
-      dx2 = dx*dx
-      dy2 = dy*dy
-      xcorr2 = xcorr*xcorr
-      ycorr2 = ycorr*ycorr
-      w = np.exp((-dx2/xcorr2) - (dy2/ycorr2))
-      w = w.reshape( (xp.size,-1) )
-      # If a point is far far outside the correlation scale, set the weights to nan
-      wtnorm = np.nansum(w,axis=-1)
-      wtnorm = np.ma.masked_where(wtnorm == 0., wtnorm)
-      w = w/wtnorm[:,np.newaxis]
-
-      return np.ma.masked_invalid(w)
-
-    x = np.array(x)
-    y = np.array(y)
     z = np.ma.masked_invalid(z)
+    if w is None or wp is None:
+        x = np.array(x)
+        y = np.array(y)
 
-    xp = np.array(xi).reshape(-1)
-    yp = np.array(yi).reshape(-1)
+        xp = np.array(xi).reshape(-1)
+        yp = np.array(yi).reshape(-1)
 
-    # Weight matrix from output points to input points
-    if wp is None:
-        wp = calc_weights(xp,yp,x,y)
-    if verbose:
-        print("Size of weight matrix, output to input: %d %d" % wp.shape)
+        # Weight matrix from output points to input points
+        if wp is None:
+            wp = calc_weights(xp,yp,x,y,xcorr,ycorr)
+        if verbose:
+            print("Size of weight matrix, output to input: %d %d" % wp.shape)
 
-    # Weight matrix from input points to input poitns
-    if w is None:
-        w = calc_weights(x,y,x,y)
-    if verbose:
-        print("Size of weight matrix, input to input: %d %d" % w.shape)
+        # Weight matrix from input points to input poitns
+        if w is None:
+            w = calc_weights(x,y,x,y,xcorr,ycorr)
+        if verbose:
+            print("Size of weight matrix, input to input: %d %d" % w.shape)
+
+    # Make w and wp a masked array
+    w  = np.ma.MaskedArray(w, copy=True, mask = np.zeros(w.shape))
+    wp = np.ma.MaskedArray(wp,copy=True, mask = np.zeros(wp.shape))
+    # Mask nan points of input
+    inmask = np.isnan(z)
+    w.mask[:,inmask] = True
+    w.mask[inmask,:] = True
+    wp.mask[:,inmask] = True
+
+    w  = w/w.sum(axis=-1)[:,np.newaxis]
+    wp = wp/wp.sum(axis=-1)[:,np.newaxis]
 
     zpp = zp = np.sum(wp*z,axis=-1)
     zpb = np.zeros(z.shape)
@@ -331,7 +366,7 @@ def barnes(x,y,z,xi,yi,xcorr,ycorr,npass = 2, w = None, wp = None):
       if verbose:
           print('RMS adjustment after pass %d: %f' % (iter, np.std(zpn-zpp)))
 
-    return zp.reshape(xi.shape), w, wp
+    return zp
 
 def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar = 'distance', yvar = 'pressure', nx = None, ny = None, xcorr=None, ycorr = 50, npass = 2 ):
     """
@@ -352,17 +387,19 @@ def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar 
 
     """
     import numpy as np
+    import itertools
     from pandas import DataFrame
+    from matplotlib.path import Path
     if not (nx is None) and (ny is None):
         print("nx and ny must either both be none or valid integers")
 
-    x = np.ma.masked_invalid(botdata[xvar].as_matrix())
-    y = np.ma.masked_invalid(botdata[yvar].as_matrix())
-
-    if xcorr is None:
-        xcorr = np.mean( np.diff(np.unique(x) ))*2
-    if ycorr is None:
-        ycorr = np.mean( np.diff(np.unique(y) ))*2
+    # Filter the input fields for valid points
+    if (type(botdata[xvar])) is not type(np.array([])):
+        x = np.array(botdata[xvar])
+        y = np.array(botdata[yvar])
+    notnan = np.logical_not(np.logical_or(np.isnan(x), np.isnan(y) ))
+    x = x[notnan]
+    y = y[notnan]
 
     # Initialize an empty dictionary containing all the remapped fields
     remap = {}
@@ -373,18 +410,65 @@ def grid_transect_variables( botdata, fields,  xgrid = None, ygrid = None, xvar 
     xgrid, ygrid = np.meshgrid(xgrid,ygrid)
     remap[xvar] = xgrid
     remap[yvar] = ygrid
-    remap['xcorr'] = xcorr
-    remap['ycorr'] = ycorr
 
+    # Mask the output grid based on the outer edges of the input data
+    # First loop to get the 'top' boundary (in pressure space this would be the surfacemost points
+    bound_poly = []
+    for time in sorted(botdata.time.unique()):
+        bound_poly.append( (botdata.loc[botdata['time']==time][xvar].mean(),
+                            botdata.loc[botdata['time']==time][yvar].min()) )
+    # Next loop in reverse time to get the bottom boundary (e.g. biggest pressure)
+    for time in sorted(botdata.time.unique(),reverse=True):
+        bound_poly.append( (botdata.loc[botdata['time']==time][xvar].mean(),
+                            botdata.loc[botdata['time']==time][yvar].max()) )
+    # Make an array with the points
+    remap['bound_poly'] = Path(bound_poly,closed=True)
+
+    # Do only the points within the original data extent
+    points = np.vstack( (xgrid.reshape(-1),ygrid.reshape(-1) ) ).T
+    inpoints = remap['bound_poly'].contains_points(points)
+    inpoints_grid = inpoints.reshape(xgrid.shape)
+
+    xp = xgrid.reshape(-1)
+    yp = ygrid.reshape(-1)
+
+    xp = xp[inpoints]
+    yp = yp[inpoints]
     # Need to calculate w and wp for the first field of interpolation
+    # If the correlation length scales are not specified, calculate it based on twice the average distance between points
+    # Note that the work array dp is set to zero to free RAM after use
+    if xcorr is None:
+        dp = np.fromiter([ x1 - x2 for (x1,x2) in itertools.product( xp, xp ) ], np.float )
+        xcorr = 2.*np.mean(np.abs(dp))
+        dp = 0.
+    if ycorr is None:
+        dp = np.fromiter([ x1 - x2 for (x1,x2) in itertools.product( yp, yp ) ], np.float )
+        ycorr = 2.*np.mean(np.abs(dp))
+        dp = 0.
+
     if verbose:
-        print("Begin objective mapping with %d passes, %f x length scale, %f y length scale" % (npass, xcorr, ycorr) )
-    w = None ; wp = None
+        print("Begin objective mapping of fields with %d passes, %f x length scale, %f y length scale" % (npass, xcorr, ycorr) )
+    if verbose:
+        print("Calculating weights from %d inputs and %d outputs" % (x.size, xp.size))
+    wp = calc_weights(xp, yp, x, y, xcorr, ycorr)
+    if verbose:
+        print("Calculating internal weights from %d inputs" % x.size)
+    w =  calc_weights(x, y, x, y, xcorr, ycorr)
+    # Make wp and w masked arrays so that we can modify just the masks when there's missing bottle data
+    wp = np.ma.MaskedArray(wp)
+    w  = np.ma.MaskedArray(w )
+
     for zvar in fields:
-        z = np.ma.masked_invalid(botdata[zvar].as_matrix())
+        z = botdata[zvar][notnan]
         if verbose:
             print("Number of measurements for %s: %d" % (zvar,z.size))
-        remap[zvar], w, wp = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
+        zopt = barnes(x,y,z,xgrid,ygrid,xcorr,ycorr,npass, w, wp)
+        # Initially say that the grid is all masked
+        remap[zvar] = np.ma.masked_invalid(np.zeros(xgrid.shape)*np.nan)
+        # Unmask the points in the valid dataset
+        remap[zvar].mask[inpoints_grid] = False
+        # Store the mapped variables
+        remap[zvar][inpoints_grid] = zopt
 
     return remap
 
